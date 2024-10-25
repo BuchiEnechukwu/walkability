@@ -1,0 +1,172 @@
+---
+title: "Get OSM Data"
+output: html_document
+---
+
+## Open Street Map
+
+OpenStreetMap (OSM) is a collaborative project that aims to create a free, editable map of the world. It was launched in 2004 and has since grown into one of the largest and most detailed open-source mapping platforms available. Visit [their website](openstreetmap.org) to have a look at the map.
+
+To get data from Open Street Map we will use an R package called `osmdata`
+
+```{r}
+#install.packages("osmdata")
+library(osmdata)
+```
+
+To manipulate data and deal with spatial data we need two other R packages called `sf` and `tidyverse`
+
+```{r}
+#install.packages("sf")
+library(sf)
+
+install.packages("tidyverse")
+library(tidyverse)
+```
+
+## How to use osmdata
+
+First you need to find your **city's boundaries** (the area where the data will be retrieved)
+
+```{r}
+edi_bnd <- getbb("Edinburgh", format_out = "polygon") #change city based on where you are i.e Saint Kitts or Calgary
+```
+
+
+
+
+```{r}
+edi_bnd <- getbb("Edinburgh", format_out = "polygon") #change city based on where you are i.e Saint Kitts or Calgary
+```
+
+Then you need to decide what **map features** you want to retrieve from OSM.
+In OpenStreetMap (OSM), a "map feature" refers to any geographic element or object that is represented on the map. These features can range from physical landmarks such as roads, buildings, rivers, and parks to human-made structures like shops, restaurants, schools, and transportation facilities. Map features in OpenStreetMap are typically added and edited by **volunteer contributors** using editors provided by the OSM project. Contributors can add new features, update existing ones, or remove inaccurate or outdated information to improve the accuracy and completeness of the map data.
+
+Each map feature in OpenStreetMap is represented as a geographical object with specific tags that describe its properties, such as its name, type, and other relevant information. These tags are used to categorize and classify map features, making it possible to search, filter, and visualize the data according to different criteria. At the highest level tags can be defined by a **key** and a **value**,i.e. **key** = amenity, **value** = pub
+
+Map features and their tags can be explored in the OSM wiki page [HERE](https://wiki.openstreetmap.org/wiki/Map_features)
+
+For our example we want to retrieve **Buildings**, **Amenities**, and **Street Intersections** in Edinburgh. From the wiki we see that:
+
+-   Buildings are identified with key = building 
+
+-   Amenities are identified with key = amenities and value = cafe, pub, restaurant, library, cinema, music venue etc.
+
+-   Road intersections with key = highway and value = primary, secondary, tertiary, residential
+
+We can now retrieve the data with `osmdata`
+
+Let's retrieve the buildings first:
+
+```{r}
+#do not run
+# edi_buildings <- opq (edi_bnd) %>%
+#   add_osm_feature(key = "building") %>%
+#   osmdata_sf() #this last line is to make the output a simple feature object
+# 
+# edi_buildings
+
+#getting buildings take a while so I already pull them and you will already find edinburgh, Saint Kitts and Calgary in the data folder. So we only need to open it
+
+edi_buildings <- st_read("data/edi_buildings.gpkg") #change name based on where you are, i.e. calgary_buildings.gpkg or st_kitts_buildings.
+```
+
+As you can see the sequence of instructions above return an osmdata object that represents buildings as points, lines and polygons. We want buildings to be represented as poligons, so let's take the lines only and see what they look like.
+
+```{r}
+#do not run
+# edi_buildings <- edi_buildings$osm_polygons
+# edi_buildings <- edi_buildings %>% select(osm_id)
+# 
+# plot(edi_buildings$geometry)
+```
+
+Now let's take the amenities we selected:
+
+```{r}
+
+edi_amenities <- opq (edi_bnd) %>%
+  add_osm_feature(key = "amenity", value = c("cafe","pub","restaurant","library", "cinema","music_venue")) %>%
+  osmdata_sf () #this last line is to make the output a simple feature object
+
+edi_amenities
+
+```
+
+We want amenities represented as points, so let's take the points only:
+
+```{r}
+
+edi_amenities <- edi_amenities$osm_points
+
+#select only the columns needed
+edi_amenities <- edi_amenities %>%
+  select(name, amenity)
+
+#remove NULL values
+edi_amenities <- edi_amenities %>%
+  filter(!is.na(amenity))
+
+plot(edi_amenities$geometry)
+
+```
+
+Let's now try and pull roads intersections. To do this, we first need the road network:
+
+```{r}
+
+edi_roads <- opq (edi_bnd) %>%
+  add_osm_feature(key = "highway", value = c("primary", "secondary", "tertiary", "residential")) %>%
+  osmdata_sf () #this last line is to make the output a simple feature object
+
+edi_roads <- edi_roads$osm_lines
+
+```
+
+To extract intersections between roads we need the support of another R package to do some cleaning
+
+```{r}
+install.packages("stplanr")
+library(stplanr)
+
+#break road network at intersecting lines
+rnet_vertices = rnet_breakup_vertices(edi_roads)
+
+#extract point of intersection
+ 
+boundaries = line2points(rnet_vertices)
+
+#get points coordinates
+
+boundaries_df = as.data.frame(st_coordinates(boundaries))
+
+#group by coordinates to find road segments sharing the same intersection
+
+boundaries_n = dplyr::summarise(dplyr::group_by(boundaries_df, X, Y), n = dplyr::n())
+
+#we define junctions as points shared among more than 3 street segments
+
+junction_df = boundaries_n[boundaries_n$n >= 3, ]
+
+#transform a data frame into an sf object 
+
+edi_intersections = sf::st_as_sf(junction_df[,1:2], coords = c("X", "Y"), crs = sf::st_crs(edi_roads))
+
+#we can finally plot our intersections
+
+plot(edi_intersections$geometry)
+
+```
+
+
+We now have all the data we wanted and we can save them in our working directory:
+
+```{r}
+
+#st_write(edi_buildings, "data/edi_buildings.gpkg") this file is already available for all cities
+st_write(edi_amenities, "data/edi_amenities.gpkg")
+  st_write(edi_intersections, "data/edi_intersections.gpkg")
+
+```
+Once you have collected the data. They can be used for further analysis with R or other programming languages, or other tools such as QGIS.
+

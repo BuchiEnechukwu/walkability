@@ -1,0 +1,141 @@
+---
+title: "Routing"
+output: html_document
+---
+# Multimodal Routing
+
+Multimodal routing involves planning and navigating routes with multiple modes of transportation, such as walking, biking, driving or public transit. To do this computationally we can use `osrm` and R package that interfaces R with the OSM routing system.
+
+```{r}
+#let's install and load the package
+install.packages("osrm")
+library(osrm)
+```
+We will also need the following packages (as usual!):
+
+```{r}
+library(sf)
+library(tidyverse)
+library(tmap)
+```
+
+## Data 
+
+To do some routing we can load the date we obtained and generated in the previous tutorial:
+```{r}
+#let's use our base geography
+grid1 <- st_read("data/walkability.gpkg") %>% st_transform(4326) #we transform this to WGS84 which is the crs required for routing
+#amt1<-st_read("data/edi_amenities.gpkg") #this are already WGS84
+```
+
+To compute routes we need origins and destinations as points. Amenities are already points, while the grid is made of hexagonal polygons. To transform the grid into points we can take the hexagon's centroids 
+
+```{r}
+grid_centroids <- st_centroid(grid)
+```
+
+## Route from A to B
+
+Routing is often used to find the shortest path between point A to B with various mode of transport. With `osrm` we can do it with the `osrmRoute`: 
+
+```{r}
+route <- osrmRoute(src = grid_centroids[100,],
+                   dst = amt[100,],
+                   osrm.profile = "foot" #this can also be bike or car
+                   )
+plot(route$geometry)
+```
+## Site selection
+
+Let's now select a site in our city that we want to explore in terms of service accessibility. 
+
+
+```{r}
+tmap_mode("view")
+  tm_shape(grid_centroids) +
+    tm_dots("walkability_2", alpha = 0.5, palette = "viridis", midpoint = 0)
+```
+Let's take a site that is on the high end in terms of walkability and let's see what services are available in the area.
+
+```{r}
+#to isolate the site we can filter the grid centroids based on the id of the site
+site1 <- grid_centroids %>%
+  filter(gid == "376")
+```
+
+## Isochrones
+
+An isochrone is a geographical representation that shows areas reachable from a specific point within a given time frame. It typically displays regions that can be reached within a certain amount of time, considering various modes of transportation or travel speeds. 
+
+```{r}
+iso <- osrmIsochrone(loc = site, 
+                     breaks = c(5,10,15),
+                     osrm.profile = "foot") #even for isochrones it is possible to pick the mode of transport of choice
+iso <- iso %>%
+  st_make_valid() # this function makes sure that the geometry is correct as sometimes when the isochrones are drawn there are some overlappings which makes the geometry not valid 
+```
+
+Let's see how they look like:
+
+```{r}
+tmap_mode("view")
+  tm_shape(site) +
+    tm_dots(col = "red")+
+    tm_shape(iso) +
+    tm_polygons("isomax", alpha = 0.5, style = "cat") 
+    
+```
+
+## Service Accessibility by Isochrones (Cumulative Accessibility)
+
+To see what services are accessible in 5, 10 or 15 minute by walk let's intersect the isochrones with the amenities that we obtained from OSM.
+
+```{r}
+
+site_services <- st_intersection(iso, amt) #
+
+view(site_services)
+```
+
+To count the amenities that intersect the isochrones we can count how many times each isochrone is duplicated.
+
+```{r}
+
+site_services <- site_services %>%
+  st_drop_geometry() %>% #once the intersection is done we do not need the spatial variable which would slow down the aggregation
+  group_by(id, amenity) %>%
+  summarise(
+    srv_c = n()
+  )
+
+view(site_services)
+
+```
+
+As we need a column for each service type to map them with tmap let's now reshape the dataset and join it back with the isochrone geometry:
+
+```{r}
+site_services <- site_services %>%
+  pivot_wider(id_cols = "id", names_from = "amenity", values_from = "srv_c") %>%
+  inner_join(iso, by = c("id" = "id")) %>%
+  st_as_sf()
+
+view(site_services)
+```
+
+Let's have a look at this dataset to check the max and min:
+```{r}
+
+summary(site_services)
+
+```
+
+
+We are now ready to map the results:
+
+```{r}
+tmap_mode("view")
+  tm_shape(site_services) + 
+    tm_fill(col = c("cafe", "pub", "restaurant"), palette = "viridis", breaks = c(1, 20, 40, 60, 80, 100)) #set the breaks to be able to compare the maps between each other taking into consideration the count max and min 
+```
+

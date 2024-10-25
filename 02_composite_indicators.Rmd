@@ -1,0 +1,336 @@
+---
+title: "Composite Indicators"
+output: html_document
+---
+
+# Building a composite indicator to measure walkability
+
+A **composite indicator**, also known as a multidimensional index, is a statistical tool that combines multiple individual indicators or variables into a single measure to represent a broader concept or phenomenon.
+
+In this notebook, we will develop a composite indicator to measure **walkability** following Frank et al. (2005) with some adjustments.
+
+## Variable Selection
+
+-   Number of intersections per square kilometer -\> this gives us a measure of street connectivity
+-   Area covered by building units per square kilometer (rather than count of residential buildings per acre) -\> this gives us a measure of building density
+-   Presence of leisure amenities (rather than entropy score) -\> this gives us a measure of the attractiveness of the area
+
+## Data Preparation
+
+As we are working with geographical data we first need to decide what areal units to use as a basis to develop our index. To have areal units that are uniform across cities we can use an hexagonal grid
+
+```{r}
+
+library(sf)
+library(tidyverse)
+library(units)
+
+#load the data
+buildings <- st_read("data/edi_buildings.gpkg") %>% st_transform(27700)
+intersections <- st_read("data/edi_intersections.gpkg") %>% st_transform(27700)
+amenities <- st_read("data/edi_amenities.gpkg") %>% st_transform(27700)
+
+
+#create grid over study area
+
+cell_area <- as_units(1, "km^2") # target grid size
+
+grid_spacing <- sqrt(2*cell_area/sqrt(3)) # size of hexagon calculated from area
+
+
+grid <- st_make_grid(buildings, cellsize = grid_spacing, what = "polygons", square = FALSE) %>% st_sf() 
+
+grid <- grid %>%
+  mutate(
+    gid = seq(1:nrow(grid))
+  )
+
+plot(grid$geometry)
+```
+
+We now have our areal units but no data associated to them, so we need to make a spatial link between the data and the grid and then aggregate our individual data points to the areal unit based on the nature of the data.
+
+So let's go back to the indicators we decided to use and see how we can aggregate them:
+
+-   number of intersection per square km -\> we need to count how many intersections fall in an hexagonal cell;
+
+-   area covered by buildings -\> we first need to intersect the buildings to the hexagons, measure the area and sum each building area falling within each hexagon cell;
+
+-   presence of leisure amenities per square km -\> we need to count the amenities falling within each hexagonal grid
+
+### Intersection Count
+
+```{r}
+
+grid_intersections <- st_intersection(grid, intersections) %>% # this duplicates the hexagon cells for every intersecting point
+  st_drop_geometry() %>% #once the intersection is done it is better to drop the geom column as it will speeds up other operations that do not require the spatial component
+  group_by(gid) %>% #this groups the hexagons by id to return to a grid with one row per id
+  summarise(
+    its_c = n() #this counts the number of rows that had the same gid
+  ) 
+
+```
+
+### Building Area Count
+
+```{r}
+
+grid_buildings <- st_intersection(buildings, grid) #in this case buildings comes first because we want a dataset with the shapes of buildings divided when crossed by a hexagon to be able to measure the building area falling within each hexagon cell 
+
+######THIS IS GOING TO TAKE A BIT#####
+
+```
+
+To better understand what `st_intersections` is doing let's take a look at a building intersecting two hexagons.
+
+```{r}
+
+grid_buildings[grid_buildings$osm_id == "1006965122",]#by viewing the data I picked the first osm building feature that was repeated (had the same ID) by different gid
+
+plot(grid_buildings[grid_buildings$osm_id == "1006965122",]$geom) 
+```
+
+We can now compute the area
+
+```{r}
+grid_buildings <- grid_buildings %>%
+  mutate(
+    bld_a = st_area(grid_buildings)
+  ) 
+```
+
+and sum that for each hexagon cell
+
+```{r}
+grid_buildings <- grid_buildings %>%
+  st_drop_geometry() %>% #we don't need the spatial referent anymore
+  group_by(gid) %>%
+  summarise(
+    bld_a = sum(bld_a)
+  )
+
+```
+
+### Leisure Amenities Count
+
+```{r}
+
+grid_amenities <- st_intersection(grid, amenities) %>% # this duplicates the hexagon cells for every intersecting point
+  st_drop_geometry() %>% #once the intersection is done it is better to drop the geom column as it will speeds up other operations that do not require the spatial component
+  group_by(gid) %>% #this groups the hexagons by id to return to a grid with one row per id
+  summarise(
+    amt_c = n() #this counts the number of rows that had the same gid
+  ) 
+```
+
+### Create a dataset with all indicators
+
+Once we processed each indicator we can join them all together with the grid.
+
+```{r}
+
+grid <- grid %>%
+  full_join(grid_intersections, by = c("gid" = "gid")) %>%
+  full_join(grid_buildings, by = c("gid" = "gid")) %>%
+  full_join(grid_amenities, by = c("gid" = "gid"))
+
+view(grid)
+
+```
+
+As you can see there are many NULL values in the table. These are cells with no data. Deciding how to treat **data missingness** is a very important step in data science as missing data can mean different things. In our case we know that the grid is built as a rectangle over the study area. As a consequence, it does not follow the shape of the city's built-up area which is what we are mostly interested in. Therefore, it makes sense to **remove the cells where the building area coverage is NULL**. On the contrary, the missingness related to the **amenities count or intersections count** is a very important information as it flags parts of the built-up area which are not particularly attractive or with individual or no streets. Therefore, in this case we want to **transform the NULL value in 0.**
+
+```{r}
+grid <- grid %>%
+  filter(!is.na(bld_a)) %>%
+  replace(is.na(.), 0)
+
+view(grid)
+```
+
+Great! We can now move to the following step.
+
+## Data Exploration
+
+It is important to know what are the characteristics of the data you are working on. Some basic steps for exploring your data are:
+
+- look at the shapes of your distributions with an histogram
+- look at the correlations between variables
+- look at how the data distribute spatially with maps
+
+As we will do some visualisations here we will use `ggplot2`:
+
+```{r}
+install.packages("ggplot2")
+library(ggplot2)
+```
+
+### Histograms
+
+```{r}
+#intersection count
+grid %>%
+  st_drop_geometry() %>%
+  ggplot(aes(x = its_c))+
+  geom_histogram(bins = 10)
+  
+```
+```{r}
+#amenities count
+
+grid %>%
+  ggplot(aes(x = amt_c))+
+  geom_histogram(bins = 10)
+
+```
+```{r}
+#building area
+
+grid %>%
+  ggplot(aes(x = bld_a))+
+  geom_histogram(bins = 10)
+
+```
+### Maps
+
+To visualise maps we can use `tmap`:
+```{r}
+install.packages("tmap")
+library(tmap)
+```
+
+With the view mode you will create interactive maps where you can change the base map in a way that will help contextualising the results.
+
+```{r}
+tmap_mode("view")
+tm_shape(grid) +
+    tm_polygons(c("its_c", "amt_c", "bld_a"), alpha = 0.5, style = "equal") +
+    tm_facets(sync = TRUE, ncol = 1)
+```
+
+
+### Correlations
+
+To visualise correlations we can use a corrplot with `ggcorrplot`
+
+```{r}
+install.packages("corrplot")
+library(ggcorrplot)
+```
+
+
+```{r}
+
+#first we need to compute the correlation matrix
+corr <- round(cor(st_drop_geometry(grid[,2:4])), 2) 
+corr
+
+#then we can compute the p-values - a correlation to be statistically significant needs to have a p-value < 0.001
+p.mat <- cor_pmat(st_drop_geometry(grid[,2:4]))
+p.mat
+
+#finally we can make the corrplot
+
+ggcorrplot(corr, hc.order = TRUE,
+    type = "lower", p.mat = p.mat)
+```
+
+
+## Data Standardization
+
+Data standardization, also known as z-score normalization, is a statistical technique used to transform variables with different scales into a common scale. This process allows for easier comparison and analysis of the variables.
+
+The formula for calculating the z-score of a data point x_i in a dataset is:
+
+$$ z = \frac{x_i - \mu}{\sigma} $$
+
+where:
+
+-   *z* is the standardized value (z-score).
+
+-   *x_i* is the original data point.
+
+-   *μ* is the mean of the variable distribution.
+
+-   *σ* is the standard deviation of the variable distribution.
+
+R has an in-built function that allows to standardise your data, which is called `scale()`; so, let's scale our variables:
+
+```{r}
+###it is always good practice to save the raw data to avoid starting from the beginning when something goes wrong
+
+grid_raw <- grid
+
+grid <- grid %>%
+  mutate( #the scale function returns a matrix while mutate wants a vector, which is why the scale function is within the as.vector function
+    its_c = as.vector(scale(its_c)),
+    bld_a = as.vector(scale(bld_a)),
+    amt_c = as.vector(scale(amt_c))
+  )
+
+
+
+summary(grid[,2:4]) #mean must be 0
+
+sapply(grid[2:4], sd) #sd must be 1
+
+```
+
+The distributions are now transformed to have **mean = 0** and **standard deviation = 1**
+
+## Combining Indicators
+
+To create a composite indicator you need to combine standardized indicators by summing them up. Depending on the definition of the phenomenon you want to measure you can add some weights to each indicator.
+
+In Frank et al. (2005) the land use mix is weighted as 6 times more important than the other variables. As we mapped land use mix with the idea of attractiveness using the count of amenities as a proxy we create a composite indicators that gives more importance to the presence of amenities.
+
+```{r}
+
+Walkability <- grid %>%
+  mutate(
+    walkability_0 = 6*amt_c + bld_a + its_c
+  )
+  
+```
+
+We obtain our first composite indicator to measure walkability !!!
+
+## Sensitivity Analysis
+
+Sensitivity analysis is an important step when developing composite indicators to assess the robustness of the results to changes in the weighting or inclusion/exclusion of individual variables.
+
+```{r}
+#create different composite indicators with different weights
+Walkability <- Walkability %>%
+  mutate(
+    walkability_1 = 3*amt_c + bld_a + its_c,
+    walkability_2 = amt_c + bld_a + its_c
+  )
+
+#compute correlation between different composite indicators 
+
+Walkability %>%
+  st_drop_geometry() %>%
+  select(starts_with("walkability")) %>%
+  cor()
+```
+
+## Visualisation
+
+```{r}
+#mapping with tmap
+
+tmap_mode("view")
+tm_shape(Walkability) +
+    tm_fill("walkability_2", alpha = 0.5, palette = "viridis", midpoint = 0) 
+
+
+```
+## Save
+
+Finally do not forget to save your composite indicator:
+
+```{r}
+st_write(Walkability, "data/walkability.gpkg")
+```
+
